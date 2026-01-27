@@ -1,29 +1,88 @@
-dowload whole folder with python files and json with data.
-start with dowloading requirements
-Install with: pip install -r requirements.txt
-edit .env.temple, remove .temple leave only ".env" and fill with your keys.
-next you can either run classic way api.py or use uvicorn api:app --reload --port 8000
+# Running the Application
 
-from there you can check if it's working
-http://localhost:8000/health
-<img width="1494" height="780" alt="image" src="https://github.com/user-attachments/assets/71367eef-9cc0-49c1-baef-42b94607f943" />
-then use ask
-fill question with product you want to check mikros of
-set 
-Content-Type to "application/json"
-k-stands fro number of outputs, 
-you can also try different mode:
-local/gemini/groq if you filled proper keys before
+Follow the steps below to properly set up and run the application.
 
-<img width="1473" height="1051" alt="image" src="https://github.com/user-attachments/assets/257ae3cc-867b-459f-b76f-4c4a56a3d5b4" />
-<img width="1495" height="1032" alt="image" src="https://github.com/user-attachments/assets/3ade9696-c7bd-436d-be4a-593ed5f04276" />
-<img width="1486" height="1038" alt="image" src="https://github.com/user-attachments/assets/9598396a-b376-4a6b-81bd-a9e9bdc5c130" />
 
-if you try to get too many responses you will be timed out
-<img width="1497" height="948" alt="image" src="https://github.com/user-attachments/assets/0bea5b2d-3c1b-44cd-aa90-a78724056630" />
+## 1. Download the project
 
-don't try to inject anything
-<img width="1479" height="758" alt="image" src="https://github.com/user-attachments/assets/21c1425d-69fa-4694-8037-05882a40949d" />
+Download the **entire folder** containing:
+
+- Python source files
+- JSON data files
+
+
+## 2. Install requirements
+
+Start by installing all required dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+
+## 3. Configure environment variables
+
+1. Locate the file: `.env.template`
+2. Rename it to: `.env`
+3. Open the file and fill in your API keys
+
+
+## 4. Run the application
+
+You can run the app in two ways:
+
+### Option A — Classic run (it should run unicorn)
+
+```bash
+python api.py
+```
+
+### Option B — Using uvicorn (recommended i tested it this way)
+
+```bash
+uvicorn api:app --reload --port 8000
+```
+
+
+## 5. Test the API with Postman
+
+I'm using Postman to send all the requests.
+
+### Health Check
+
+First, verify the API is running:
+
+```
+GET http://localhost:8000/health
+```
+
+![Health Check](https://github.com/user-attachments/assets/71367eef-9cc0-49c1-baef-42b94607f943)
+
+### Ask Endpoint
+
+Then use the `/ask` endpoint:
+
+**Parameters:**
+- **question**: Product you want to check micronutrients for
+- **k**: Number of outputs (results)
+- **mode**: Select model type (`local`, `gemini`, or `groq` if filled proper keys)
+- **Content-Type**: Set to `application/json`
+
+![Request Example 1](https://github.com/user-attachments/assets/257ae3cc-867b-459f-b76f-4c4a56a3d5b4)
+
+![Request Example 2](https://github.com/user-attachments/assets/3ade9696-c7bd-436d-be4a-593ed5f04276)
+
+![Request Example 3](https://github.com/user-attachments/assets/9598396a-b376-4a6b-81bd-a9e9bdc5c130)
+
+### Important Notes
+
+**Warning**: If you request too many responses, you will get an error.
+
+![Timeout Example](https://github.com/user-attachments/assets/0bea5b2d-3c1b-44cd-aa90-a78724056630)
+
+**Security**: Do not attempt to inject anything into the requests.
+
+![SQL Injection Warning](https://github.com/user-attachments/assets/21c1425d-69fa-4694-8037-05882a40949d)
 
 
 
