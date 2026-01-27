@@ -9,11 +9,11 @@ rank-bm25>=0.2.2
 pydantic>=1.9.0
 python-dotenv>=0.19.0
 
-# REST API (Lab 7)
+# REST API
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 
-# LLM integrations (optional)
+# LLM integrations
 google-genai>=0.3.0
 groq>=0.4.0
 
@@ -21,4 +21,5 @@ groq>=0.4.0
 pytest>=6.0.0
 requests>=2.28.0
 httpx>=0.24.0
+
 
