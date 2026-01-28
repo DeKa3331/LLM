@@ -31,6 +31,7 @@ except Exception:
 DEFAULT_SYSTEM = "You are a factual assistant. Answer only using provided context."
 MODEL_MODE = os.getenv("MODEL_MODE", "local").lower()
 
+#security checks for number/id/credicard-like patterns/bank accounts/profanity/injection/links
 RE_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 RE_PHONE = re.compile(r"(?:\+?48)?\s?(?:\d[ -]?){9,}")
 RE_PESEL = re.compile(r"\b\d{11}\b")
@@ -46,6 +47,19 @@ INJECTION_PATTERNS = [
     r"you are now",
     r"jailbreak",
     r"follow the (next|below) instructions",
+    r"disregard (your|the) (prior|previous) (directions|instructions)",
+    r"(?i)\[system\].*?\[\/system\]",
+    r"(?i)\[developer\].*?\[\/developer\]",
+    r"(?i)\[\/?prompt\]",
+    r"(?i)system:.*?user:",
+    r"(?i)developer:.*?user:",
+    r"(?i)prompt:.*?user:",
+    r"shutdown",
+    r"format your response as",
+    r"delete (all )?your (memory|knowledge)",
+    r"what is the (system|developer) prompt\?",
+    r"print out (the )?(system|developer) prompt",
+    r"show me (the )?(system|developer) prompt",
 ]
 
 ALLOWED_DOMAINS = {"example.com"}
@@ -121,11 +135,12 @@ class RagResponse(BaseModel):
     hits: Optional[List[Any]] = None
     context: Optional[str] = None
     citations: Optional[List[Any]] = None
+    question: Optional[str] = None
     reason: Optional[str] = None
     error: Optional[str] = None
 
 
-def gemini_generate(prompt: str, system: str = DEFAULT_SYSTEM, temperature: float = 0.0, **kwargs) -> Dict[str, Any]:
+def gemini_generate(prompt: str, system: str = DEFAULT_SYSTEM, temperature: float = 0.0, max_output_tokens: int = 512) -> Dict[str, Any]:
     if genai is None:
         return {"status": "error", "mode": "gemini", "error": "google-genai not installed"}
     
@@ -140,7 +155,7 @@ def gemini_generate(prompt: str, system: str = DEFAULT_SYSTEM, temperature: floa
         config = genai.types.GenerateContentConfig(
             system_instruction=system,
             temperature=temperature,
-            max_output_tokens=int(kwargs.get("max_output_tokens", 512)),
+            max_output_tokens=int(max_output_tokens),
         )
         
         start = time.perf_counter()
@@ -171,7 +186,7 @@ def gemini_generate(prompt: str, system: str = DEFAULT_SYSTEM, temperature: floa
         return {"status": "error", "mode": "gemini", "error": str(e)}
 
 
-def groq_generate(prompt: str, system: str = DEFAULT_SYSTEM, temperature: float = 0.0, **kwargs) -> Dict[str, Any]:
+def groq_generate(prompt: str, system: str = DEFAULT_SYSTEM, temperature: float = 0.0, max_output_tokens: int = 512) -> Dict[str, Any]:
     if Groq is None:
         return {"status": "error", "mode": "groq", "error": "groq-sdk not installed"}
     
@@ -191,7 +206,7 @@ def groq_generate(prompt: str, system: str = DEFAULT_SYSTEM, temperature: float 
                 {"role": "user", "content": prompt},
             ],
             temperature=temperature,
-            max_tokens=int(kwargs.get("max_output_tokens", 512)),
+            max_tokens=int(max_output_tokens),
         )
         latency = round(time.perf_counter() - start, 3)
         
@@ -210,26 +225,25 @@ def groq_generate(prompt: str, system: str = DEFAULT_SYSTEM, temperature: float 
         return {"status": "error", "mode": "groq", "error": str(e)}
 
 
-def local_generate(prompt: str, system: str = DEFAULT_SYSTEM, temperature: float = 0.0, **kwargs) -> Dict[str, Any]:
-    k = int(kwargs.get("k", 4))
+def local_generate(prompt: str, system: str = DEFAULT_SYSTEM, temperature: float = 0.0, max_output_tokens: int = 512, k: int = 4) -> Dict[str, Any]:
     tc = ToolCall(tool="rag.search", args={"question": prompt, "k": k})
-    ok, payload, err = run_tool(tc, timeout_s=2.0)
-    if not ok:
-        return {"status": "error", "error": err, "mode": "local"}
+    result = run_tool(tc, timeout_s=2.0)
+    if not result["ok"]:
+        return {"status": "error", "error": result["error"], "mode": "local"}
     try:
-        RagResponse(**payload)
-        return payload
+        RagResponse(**result["payload"])
+        return result["payload"]
     except ValidationError as e:
         return {"status": "error", "error": f"Invalid response format: {str(e)}", "mode": "local"}
 
 
-def chat_once(prompt: str, system: str = DEFAULT_SYSTEM, temperature: float = 0.0, **kwargs) -> Dict[str, Any]:
+def chat_once(prompt: str, system: str = DEFAULT_SYSTEM, temperature: float = 0.0, max_output_tokens: int = 512, k: int = 4) -> Dict[str, Any]:
     mode = os.getenv("MODEL_MODE", MODEL_MODE).lower()
     if mode == "gemini":
-        return gemini_generate(prompt, system, temperature=temperature, **kwargs)
+        return gemini_generate(prompt, system, temperature=temperature, max_output_tokens=max_output_tokens)
     if mode == "groq":
-        return groq_generate(prompt, system, temperature=temperature, **kwargs)
-    return local_generate(prompt, system, temperature=temperature, **kwargs)
+        return groq_generate(prompt, system, temperature=temperature, max_output_tokens=max_output_tokens)
+    return local_generate(prompt, system, temperature=temperature, max_output_tokens=max_output_tokens, k=k)
 
 
 def _ask_rag_impl(question: str, k: int = 4) -> Dict[str, Any]:
@@ -275,31 +289,31 @@ def _run_tool_sync(tc: ToolCall) -> Dict[str, Any]:
     return impl(args.question, args.k)
 
 
-def run_tool(tc: ToolCall, timeout_s: float = 5.0) -> tuple[bool, Dict[str, Any], Optional[str]]:
+def run_tool(tc: ToolCall, timeout_s: float = 5.0) -> Dict[str, Any]:
     with ThreadPoolExecutor(max_workers=1) as ex:
         fut = ex.submit(_run_tool_sync, tc)
         try:
             out = fut.result(timeout=timeout_s)
-            return True, out, None
+            return {"ok": True, "payload": out, "error": None}
         except FuturesTimeout:
-            return False, {}, "timeout"
+            return {"ok": False, "payload": {}, "error": "timeout"}
         except ValidationError as err:
-            return False, {}, f"validation_error: {err}"
+            return {"ok": False, "payload": {}, "error": f"validation_error: {err}"}
         except Exception as err:
-            return False, {}, str(err)
+            return {"ok": False, "payload": {}, "error": str(err)}
 
 
 def ask_rag(question: str, k: int = 4) -> Dict[str, Any]:
     tc = ToolCall(tool="rag.search", args={"question": question, "k": k})
     
-    ok, payload, err = run_tool(tc, timeout_s=5.0)
+    result = run_tool(tc, timeout_s=5.0)
     
-    if not ok:
+    if not result["ok"]:
         return {
             "status": "error",
             "mode": "local",
             "latency_s": 0.0,
-            "error": err,
+            "error": result["error"],
             "flags": {},
             "hits": [],
             "context": "",
@@ -308,15 +322,15 @@ def ask_rag(question: str, k: int = 4) -> Dict[str, Any]:
         }
     
     try:
-        RagResponse(**payload)
-        return payload
+        RagResponse(**result["payload"])
+        return result["payload"]
     except ValidationError as e:
         return {
             "status": "error",
             "mode": "local",
-            "latency_s": payload.get("latency_s", 0.0),
+            "latency_s": result["payload"].get("latency_s", 0.0),
             "error": f"Invalid response format: {str(e)}",
-            "flags": payload.get("flags", {}),
+            "flags": result["payload"].get("flags", {}),
             "hits": [],
             "context": "",
             "citations": [],

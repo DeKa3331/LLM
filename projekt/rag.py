@@ -1,7 +1,7 @@
 import os
 import re
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 try:
     import faiss
@@ -20,62 +20,43 @@ except Exception:
 
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 CHUNK_SIZE = 400
-OVERLAP = 80
+OVERLAP = 120
 
 
-def simple_chunk(text: str, chunk_chars: int = CHUNK_SIZE, overlap: int = OVERLAP) -> List[Tuple[int, int, str]]:
-    out = []
+def simple_chunk(text: str, chunk_chars: int = CHUNK_SIZE, overlap: int = OVERLAP):
     i = 0
     while i < len(text):
         j = min(len(text), i + chunk_chars)
-        out.append((i, j, text[i:j]))
-        if j == len(text):
+        yield (i, j, text[i:j])
+        if j >= len(text):
             break
         i = max(0, j - overlap)
-    return out
 
 
 def tokenize(text: str) -> List[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
-def embed_texts(embedder: SentenceTransformer, texts: List[str]) -> Any:
-    return embedder.encode(
-        texts,
-        batch_size=32,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
-    ).astype("float32")
+def embed_texts(texts: List[str], batch_size: int = 64):
+    return embedder.encode(texts, batch_size=batch_size, convert_to_numpy=True, normalize_embeddings=True).astype("float32")
+
+embedder = SentenceTransformer(MODEL_NAME)
 
 
-def pack_context(
-    hits: List[Tuple[float, Dict[str, Any]]],
-    max_per_source: int = 2,
-    max_chars: int = 2000,
-) -> Tuple[str, List[Dict[str, Any]]]:
-    per = {}
-    ordered: List[Dict[str, Any]] = []
-    
-    for _, rec in hits:
-        key = (rec.get("source"), rec.get("page"))
-        per.setdefault(key, 0)
-        if per[key] < max_per_source:
-            ordered.append(rec)
-            per[key] += 1
-    
-    cites = []
+def pack_context(hits, max_chars=2000):
     parts = []
-    for i, rec in enumerate(ordered, start=1):
-        cites.append({
-            "n": i,
-            "source": rec.get("source"),
-            "page": rec.get("page"),
-            "chunk_id": rec.get("chunk_id"),
-        })
-        parts.append(f"[{i}] {rec.get('chunk', '')}")
+    citations = []
     
-    ctx = "\n\n".join(parts)[:max_chars]
-    return ctx, cites
+    for i, hit in enumerate(hits, start=1):
+        parts.append(f"[{i}] {hit['chunk']}")
+        citations.append({
+            "n": i,
+            "source": hit.get("source"),
+            "page": hit.get("page"),
+        })
+    
+    context = "\n\n".join(parts)[:max_chars]
+    return {"context": context, "citations": citations}
 
 
 class MiniRAG:
@@ -85,16 +66,13 @@ class MiniRAG:
         usda_json_path: str = "FoodData_Central_foundation_food_json_2025-12-18.json",
         chunk_chars: int = CHUNK_SIZE,
         overlap: int = OVERLAP,
-        model_name: str = MODEL_NAME,
     ) -> None:
         self.usda_json_path = usda_json_path
         self.chunk_chars = chunk_chars
         self.overlap = overlap
-        self.model_name = model_name
-        self.embedder = SentenceTransformer(model_name)
         self.docs = self._load_usda_corpus(usda_json_path)
         self.chunks = self._make_chunks(self.docs, chunk_chars, overlap)
-        self.embs = embed_texts(self.embedder, [c["chunk"] for c in self.chunks])
+        self.embs = embed_texts(self.chunks_texts(), batch_size=64)
         self.index = faiss.IndexFlatIP(self.embs.shape[1])
         self.index.add(self.embs)
         self.bm25 = None
@@ -122,7 +100,7 @@ class MiniRAG:
             data = json.load(f)
         
         foods = data.get("FoundationFoods", []) or []
-        for food in foods[:100]:  # Limit to 100 for demo
+        for food in foods[:100]:  # max 100 items for demo
             desc = food.get("description", "Unknown")
             nutrients = food.get("foodNutrients", []) or []
             
@@ -169,53 +147,60 @@ class MiniRAG:
                     })
         return out
     
-    def retrieve_dense(self, query: str, k: int = 5) -> List[Tuple[float, Dict[str, Any]]]:
-        qv = embed_texts(self.embedder, [query])
+    def chunks_texts(self) -> List[str]:
+        return [c["chunk"] for c in self.chunks]
+    
+    def retrieve_dense(self, query: str, k: int = 5) -> List[Dict]:
+        qv = embed_texts([query], batch_size=1)
         scores, idxs = self.index.search(qv, k)
         
-        res: List[Tuple[float, Dict[str, Any]]] = []
+        hits = []
         for i in range(min(k, len(idxs[0]))):
-            res.append((float(scores[0][i]), self.chunks[int(idxs[0][i])]))
-        return res
+            hit = self.chunks[int(idxs[0][i])].copy()
+            hit["score"] = float(scores[0][i])
+            hits.append(hit)
+        return hits
     
-    def retrieve_bm25(self, query: str, k: int = 5) -> List[Tuple[float, Dict[str, Any]]]:
+    def retrieve_bm25(self, query: str, k: int = 5) -> List[Dict]:
         if self.bm25 is None:
             return []
         
         toks = tokenize(query)
         scores = self.bm25.get_scores(toks)
         order = list(reversed(sorted(range(len(scores)), key=lambda i: scores[i])))[:k]
-        return [(float(scores[i]), self.chunks[i]) for i in order]
+        
+        hits = []
+        for idx in order:
+            hit = self.chunks[idx].copy()
+            hit["score"] = float(scores[idx])
+            hits.append(hit)
+        return hits
     
-    def rrf_fuse(
-        self,
-        dense: List[Tuple[float, Dict[str, Any]]],
-        sparse: List[Tuple[float, Dict[str, Any]]],
-        k: int = 60,
-    ) -> List[Tuple[float, Dict[str, Any]]]:
-        scores: Dict[int, float] = {}
-        for rank, (_, doc) in enumerate(dense):
-            try:
-                idx = self.chunks.index(doc)
-                scores[idx] = scores.get(idx, 0.0) + 1.0 / (k + rank)
-            except ValueError:
-                pass
-        for rank, (_, doc) in enumerate(sparse):
-            try:
-                idx = self.chunks.index(doc)
-                scores[idx] = scores.get(idx, 0.0) + 1.0 / (k + rank)
-            except ValueError:
-                pass
-        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        return [(scores[idx], self.chunks[idx]) for idx, _ in ranked]
+    def rrf_fuse(self, dense: List[Dict], sparse: List[Dict], k: int = 60) -> List[Dict]:
+        scores = {}
+        seen = {}  # Śledzenie po "chunk" zawartości
+        
+        for rank, hit in enumerate(dense):
+            chunk_text = hit.get("chunk", "")
+            if chunk_text not in seen:
+                seen[chunk_text] = hit
+            scores[chunk_text] = scores.get(chunk_text, 0.0) + 1.0 / (k + rank)
+        
+        for rank, hit in enumerate(sparse):
+            chunk_text = hit.get("chunk", "")
+            if chunk_text not in seen:
+                seen[chunk_text] = hit
+            scores[chunk_text] = scores.get(chunk_text, 0.0) + 1.0 / (k + rank)
+        
+        # Sort by fused score
+        ranked = sorted(
+            [(seen[chunk_text], scores[chunk_text]) for chunk_text in scores],
+            key=lambda x: x[1],
+            reverse=True
+        )
+        return [hit for hit, _ in ranked]
     
-    def ask(
-        self,
-        question: str,
-        k_dense: int = 4,
-        k_sparse: int = 4,
-        k_final: int = 4,
-    ) -> Dict[str, Any]:
+    def ask(self, question: str, k_dense: int = 4, k_sparse: int = 4, k_final: int = 4) -> Dict[str, Any]:
         dense_hits = self.retrieve_dense(question, k=k_dense)
         sparse_hits = self.retrieve_bm25(question, k=k_sparse)
         
@@ -224,11 +209,11 @@ class MiniRAG:
         else:
             fused_hits = dense_hits[:k_final]
         
-        context, citations = pack_context(fused_hits, max_per_source=2, max_chars=2000)
+        packed = pack_context(fused_hits, max_chars=2000)
         
         return {
             "question": question,
             "hits": fused_hits,
-            "context": context,
-            "citations": citations,
+            "context": packed["context"],
+            "citations": packed["citations"],
         }
